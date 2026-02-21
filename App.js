@@ -7,6 +7,12 @@ const { width, height } = Dimensions.get('window');
 
 const GITHUB_PAGES_URL = 'https://johannes60-sk.github.io/pose-tracker';
 
+// Colle l'URL de ton modèle Teachable Machine ici après l'export
+const MODELS = {
+  push_up: '', // ex: 'https://teachablemachine.withgoogle.com/models/XXXXX/'
+  squat:   '',
+};
+
 export default function App() {
   const [poseTrackerInfos, setCurrentPoseTrackerInfos] = useState();
   const [repsCounter, setRepsCounter] = useState(0);
@@ -61,7 +67,7 @@ export default function App() {
         allowsInlineMediaPlayback={true}
         mediaPlaybackRequiresUserAction={false}
         style={styles.webView}
-        source={{ uri: `${GITHUB_PAGES_URL}?exercise=${exercise}` }}
+        source={{ uri: `${GITHUB_PAGES_URL}?exercise=${exercise}&model=${encodeURIComponent(MODELS[exercise] || '')}` }}
         originWhitelist={['*']}
         onMessage={onMessage}
         // Autoriser l'accès caméra dans le WebView (Android)

@@ -3,11 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>MediaPipe Exercise Tracker</title>
+  <title>Exercise Tracker</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #000; overflow: hidden; }
-    canvas { display: block; width: 100vw; height: 100vh; }
+
+    #canvas-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+    canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+    }
 
     #status {
       position: fixed;
@@ -43,59 +54,48 @@
       border-radius: 99px;
       border: 1.5px solid rgba(255,255,255,0.2);
     }
-    .badge.reps  { border-color: #00FF88; }
-    .badge.stage { border-color: #4488FF; }
+    .badge.reps     { border-color: #00FF88; }
+    .badge.position { border-color: #4488FF; }
+    .badge.conf     { border-color: #FFB800; }
+
+    #error-msg {
+      display: none;
+      position: fixed;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(200,0,0,0.85);
+      color: #fff;
+      font: 500 14px/1.5 -apple-system, sans-serif;
+      padding: 16px 24px;
+      border-radius: 12px;
+      text-align: center;
+      z-index: 20;
+      max-width: 80%;
+    }
   </style>
 </head>
 <body>
-  <video id="video" style="display:none" playsinline autoplay muted></video>
-  <canvas id="canvas"></canvas>
+  <div id="canvas-container">
+    <canvas id="canvas"></canvas>
+  </div>
 
   <div id="status"><span id="status-text">Chargement du modèle IA...</span></div>
   <div id="hud">
-    <div class="badge reps"  id="reps-badge">Reps : 0</div>
-    <div class="badge stage" id="stage-badge">— —</div>
-    <div class="badge"       id="angle-badge">Angle : —</div>
+    <div class="badge reps"     id="reps-badge">Reps : 0</div>
+    <div class="badge position" id="pos-badge">— —</div>
+    <div class="badge conf"     id="conf-badge">Conf : —</div>
   </div>
+  <div id="error-msg"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
 
   <script>
-    // Lecture de l'exercice depuis l'URL : ?exercise=push_up
+    // ─── Params URL ────────────────────────────────────────────────────────────
+    // ?exercise=push_up&model=https://teachablemachine.withgoogle.com/models/XXXXX/
     const params   = new URLSearchParams(window.location.search);
     const EXERCISE = params.get('exercise') || 'push_up';
-
-    // ─── Config des exercices ──────────────────────────────────────────────────
-    // left/right = [a, b, c] indices des landmarks (b = sommet de l'angle)
-    // down / up  = seuils d'angle en degrés
-    // invert     = true si le rep se compte en montant (bicep curl…)
-    const CONFIGS = {
-      push_up:          { left:[11,13,15], right:[12,14,16], down:90,  up:160 },
-      squat:            { left:[23,25,27], right:[24,26,28], down:100, up:160 },
-      lunge:            { left:[23,25,27], right:[24,26,28], down:100, up:160 },
-      bicep_curl:       { left:[11,13,15], right:[12,14,16], down:30,  up:160, invert:true },
-      hammer_curl:      { left:[11,13,15], right:[12,14,16], down:30,  up:160, invert:true },
-      shoulder_press:   { left:[11,13,15], right:[12,14,16], down:90,  up:160 },
-      lateral_raise:    { left:[13,11,23], right:[14,12,24], down:20,  up:80,  invert:true },
-      tricep_dip:       { left:[11,13,15], right:[12,14,16], down:90,  up:160 },
-      deadlift:         { left:[11,23,25], right:[12,24,26], down:100, up:160 },
-      glute_bridge:     { left:[11,23,25], right:[12,24,26], down:130, up:155 },
-      leg_raise:        { left:[11,23,25], right:[12,24,26], down:120, up:170, invert:true },
-      mountain_climber: { left:[23,25,27], right:[24,26,28], down:70,  up:150 },
-      high_knees:       { left:[23,25,27], right:[24,26,28], down:70,  up:150 },
-      calf_raise:       { left:[25,27,31], right:[26,28,32], down:160, up:175, invert:true },
-      jumping_jack:     { left:[11,23,25], right:[12,24,26], down:150, up:170 },
-    };
-
-    const cfg = CONFIGS[EXERCISE] || CONFIGS['push_up'];
-
-    // ─── État ──────────────────────────────────────────────────────────────────
-    let stage     = cfg.invert ? 'down' : 'up';
-    let repCount  = 0;
-    let isReady   = false;
-    let lastCount = -1;
+    const MODEL_URL = params.get('model');
 
     // ─── Communication vers React Native ──────────────────────────────────────
     function send(data) {
@@ -107,124 +107,164 @@
       }
     }
 
-    // ─── Calcul d'angle entre trois points (b = sommet) ───────────────────────
-    function calcAngle(a, b, c) {
-      const r = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
-      let deg = Math.abs(r * 180 / Math.PI);
-      return deg > 180 ? 360 - deg : deg;
-    }
-
-    // Retourne l'angle du côté le plus visible (gauche ou droite)
-    function getBestAngle(lm) {
-      const [la, lb, lc] = cfg.left;
-      const [ra, rb, rc] = cfg.right;
-      const lv = (lm[la].visibility + lm[lb].visibility + lm[lc].visibility) / 3;
-      const rv = (lm[ra].visibility + lm[rb].visibility + lm[rc].visibility) / 3;
-      return lv >= rv
-        ? calcAngle(lm[la], lm[lb], lm[lc])
-        : calcAngle(lm[ra], lm[rb], lm[rc]);
-    }
-
-    // ─── Machine à états pour les reps ────────────────────────────────────────
-    function countRep(deg) {
-      document.getElementById('angle-badge').textContent = 'Angle : ' + deg.toFixed(0) + '°';
-
-      if (!cfg.invert) {
-        if (deg < cfg.down && stage === 'up')   stage = 'down';
-        if (deg > cfg.up   && stage === 'down') { stage = 'up';   increment(); }
-      } else {
-        if (deg > cfg.up   && stage === 'down') stage = 'up';
-        if (deg < cfg.down && stage === 'up')   { stage = 'down'; increment(); }
-      }
-
-      document.getElementById('reps-badge').textContent  = 'Reps : ' + repCount;
-      document.getElementById('stage-badge').textContent = stage.toUpperCase();
-    }
-
-    function increment() {
-      repCount++;
-      if (repCount !== lastCount) {
-        lastCount = repCount;
-        send({ type: 'counter', current_count: repCount });
-      }
-    }
-
-    // ─── Vérifie que le corps est dans le cadre ────────────────────────────────
-    function checkBodyVisible(lm) {
-      return [11, 12, 23, 24].every(i => lm[i]?.visibility > 0.5);
-    }
-
-    // ─── Callback MediaPipe ────────────────────────────────────────────────────
-    const videoEl  = document.getElementById('video');
-    const canvasEl = document.getElementById('canvas');
-    const ctx      = canvasEl.getContext('2d');
-
-    function onResults(results) {
-      const W = window.innerWidth, H = window.innerHeight;
-      canvasEl.width  = W;
-      canvasEl.height = H;
-      ctx.clearRect(0, 0, W, H);
-      ctx.drawImage(results.image, 0, 0, W, H);
-
-      if (!results.poseLandmarks) {
-        setStatus('Aucune personne détectée');
-        if (isReady) { isReady = false; send({ type: 'posture', ready: false, postureDirection: 'body' }); }
-        return;
-      }
-
-      const lm = results.poseLandmarks;
-      drawConnectors(ctx, lm, POSE_CONNECTIONS, { color: '#00FF88', lineWidth: 2 });
-      drawLandmarks(ctx,  lm, { color: '#FF4444', lineWidth: 1, radius: 4 });
-
-      if (!checkBodyVisible(lm)) {
-        setStatus('Recule pour être entier dans le cadre');
-        if (isReady) { isReady = false; send({ type: 'posture', ready: false, postureDirection: 'body' }); }
-      } else {
-        if (!isReady) { isReady = true; send({ type: 'posture', ready: true }); }
-        setStatus(EXERCISE.replace(/_/g, ' ').toUpperCase());
-        countRep(getBestAngle(lm));
-      }
-    }
-
     function setStatus(txt) {
       document.getElementById('status-text').textContent = txt;
     }
 
-    // ─── Init MediaPipe Pose ───────────────────────────────────────────────────
-    const pose = new Pose({
-      locateFile: f => 'https://cdn.jsdelivr.net/npm/@mediapipe/pose/' + f,
-    });
+    function showError(msg) {
+      const el = document.getElementById('error-msg');
+      el.style.display = 'block';
+      el.textContent = msg;
+      setStatus('Erreur');
+    }
 
-    pose.setOptions({
-      modelComplexity: 1,
-      smoothLandmarks: true,
-      enableSegmentation: false,
-      minDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5,
-    });
+    // ─── Vérification du model URL ─────────────────────────────────────────────
+    if (!MODEL_URL) {
+      showError('Aucun modèle configuré.\nAjoute ?model=URL dans l\'URL.');
+    }
 
-    pose.onResults(onResults);
+    // ─── Comptage de reps ──────────────────────────────────────────────────────
+    const CONFIDENCE_THRESHOLD = 0.75; // seuil de confiance minimum
+    let currentClass = 'neutral';
+    let repCount     = 0;
+    let lastCount    = -1;
 
-    // ─── Accès caméra ─────────────────────────────────────────────────────────
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false })
-      .then(stream => {
-        videoEl.srcObject = stream;
-        videoEl.onloadedmetadata = () => {
-          videoEl.play();
-          const cam = new Camera(videoEl, {
-            onFrame: async () => { await pose.send({ image: videoEl }); },
-            width: 640,
-            height: 480,
-          });
-          cam.start();
-          send({ type: 'initialization', exercise: EXERCISE, ready: true });
-          setStatus('IA prête — ' + EXERCISE.replace(/_/g, ' '));
-        };
-      })
-      .catch(err => {
-        setStatus('Erreur caméra : ' + err.message);
+    function processClassification(predictions) {
+      // Trouve la classe avec la plus haute probabilité
+      const best = predictions.reduce((a, b) =>
+        a.probability > b.probability ? a : b
+      );
+
+      const predicted = best.probability >= CONFIDENCE_THRESHOLD
+        ? best.className
+        : 'neutral';
+
+      const conf = (best.probability * 100).toFixed(0);
+      document.getElementById('conf-badge').textContent = 'Conf : ' + conf + '%';
+      document.getElementById('pos-badge').textContent  = predicted.toUpperCase();
+
+      // Transition down → up = 1 rep
+      if (currentClass === 'down' && predicted === 'up') {
+        repCount++;
+        document.getElementById('reps-badge').textContent = 'Reps : ' + repCount;
+        if (repCount !== lastCount) {
+          lastCount = repCount;
+          send({ type: 'counter', current_count: repCount });
+        }
+      }
+
+      if (predicted !== currentClass) {
+        currentClass = predicted;
+        const ready = predicted !== 'neutral';
+        send({ type: 'posture', ready, postureDirection: predicted });
+      }
+    }
+
+    // ─── Init Teachable Machine ────────────────────────────────────────────────
+    async function init() {
+      if (!MODEL_URL) return;
+
+      try {
+        setStatus('Chargement du modèle...');
+        const model = await tmPose.load(
+          MODEL_URL + 'model.json',
+          MODEL_URL + 'metadata.json'
+        );
+
+        setStatus('Accès caméra...');
+        const webcam = new tmPose.Webcam(
+          window.innerWidth,
+          window.innerHeight,
+          true // flip (selfie)
+        );
+        await webcam.setup();
+        await webcam.play();
+
+        send({ type: 'initialization', exercise: EXERCISE, ready: true });
+        setStatus(EXERCISE.replace(/_/g, ' ').toUpperCase() + ' — Prêt !');
+
+        const canvasEl = document.getElementById('canvas');
+        canvasEl.width  = window.innerWidth;
+        canvasEl.height = window.innerHeight;
+        const ctx = canvasEl.getContext('2d');
+
+        async function loop() {
+          webcam.update();
+
+          // Dessin de la vidéo
+          ctx.drawImage(webcam.canvas, 0, 0, canvasEl.width, canvasEl.height);
+
+          // Estimation de pose + classification
+          const { pose, posenetOutput } = await model.estimatePose(webcam.canvas);
+          const predictions = await model.predict(posenetOutput);
+
+          // Dessin du squelette
+          if (pose && pose.keypoints) {
+            drawKeypoints(ctx, pose.keypoints);
+            drawSkeleton(ctx, pose.keypoints);
+          }
+
+          processClassification(predictions);
+          window.requestAnimationFrame(loop);
+        }
+
+        loop();
+
+      } catch (err) {
+        showError('Erreur : ' + err.message);
         send({ type: 'error', message: err.message });
+      }
+    }
+
+    // ─── Dessin du squelette ───────────────────────────────────────────────────
+    const SKELETON_PAIRS = [
+      [5,6],[5,7],[7,9],[6,8],[8,10],
+      [5,11],[6,12],[11,12],
+      [11,13],[13,15],[12,14],[14,16],
+    ];
+
+    function drawKeypoints(ctx, keypoints) {
+      keypoints.forEach(kp => {
+        if (kp.score > 0.4) {
+          ctx.beginPath();
+          ctx.arc(
+            kp.position.x * (canvasEl.width  / webcamWidth),
+            kp.position.y * (canvasEl.height / webcamHeight),
+            5, 0, 2 * Math.PI
+          );
+          ctx.fillStyle = '#FF4444';
+          ctx.fill();
+        }
       });
+    }
+
+    function drawSkeleton(ctx, keypoints) {
+      SKELETON_PAIRS.forEach(([i, j]) => {
+        const kpA = keypoints[i];
+        const kpB = keypoints[j];
+        if (kpA.score > 0.4 && kpB.score > 0.4) {
+          ctx.beginPath();
+          ctx.moveTo(
+            kpA.position.x * (canvasEl.width  / webcamWidth),
+            kpA.position.y * (canvasEl.height / webcamHeight)
+          );
+          ctx.lineTo(
+            kpB.position.x * (canvasEl.width  / webcamWidth),
+            kpB.position.y * (canvasEl.height / webcamHeight)
+          );
+          ctx.strokeStyle = '#00FF88';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      });
+    }
+
+    // Dimensions du webcam Teachable Machine (pour le scaling du squelette)
+    const webcamWidth  = window.innerWidth;
+    const webcamHeight = window.innerHeight;
+    const canvasEl     = document.getElementById('canvas');
+
+    init();
   </script>
 </body>
 </html>
