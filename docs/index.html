@@ -10,54 +10,38 @@
     canvas { display: block; width: 100vw; height: 100vh; }
 
     #status {
-      position: fixed;
-      top: 20px;
-      left: 0; right: 0;
-      text-align: center;
-      z-index: 10;
-      pointer-events: none;
+      position: fixed; top: 20px; left: 0; right: 0;
+      text-align: center; z-index: 10; pointer-events: none;
     }
     #status span {
-      background: rgba(0,0,0,0.65);
-      color: #fff;
+      background: rgba(0,0,0,0.65); color: #fff;
       font: 500 13px/1 -apple-system, sans-serif;
-      padding: 6px 18px;
-      border-radius: 99px;
+      padding: 6px 18px; border-radius: 99px;
     }
-
     #hud {
-      position: fixed;
-      bottom: 30px;
-      left: 0; right: 0;
-      display: flex;
-      justify-content: center;
-      gap: 10px;
-      z-index: 10;
-      pointer-events: none;
+      position: fixed; bottom: 30px; left: 0; right: 0;
+      display: flex; justify-content: center; gap: 10px;
+      z-index: 10; pointer-events: none;
     }
     .badge {
-      background: rgba(0,0,0,0.65);
-      color: #fff;
+      background: rgba(0,0,0,0.65); color: #fff;
       font: 600 14px/1 -apple-system, sans-serif;
-      padding: 9px 18px;
-      border-radius: 99px;
+      padding: 9px 18px; border-radius: 99px;
       border: 1.5px solid rgba(255,255,255,0.2);
     }
     .badge.reps  { border-color: #00FF88; }
     .badge.stage { border-color: #4488FF; }
-    .badge.warn  { border-color: #FF6B00; }
+    .badge.conf  { border-color: #FFB800; }
   </style>
 </head>
 <body>
   <video id="video" style="display:none" playsinline autoplay muted></video>
   <canvas id="canvas"></canvas>
-
-  <div id="status"><span id="status-text">Chargement du modèle IA...</span></div>
+  <div id="status"><span id="status-text">Chargement...</span></div>
   <div id="hud">
     <div class="badge reps"  id="reps-badge">Reps : 0</div>
     <div class="badge stage" id="stage-badge">— —</div>
-    <div class="badge"       id="angle-badge">Angle : —</div>
-    <div class="badge warn"  id="orient-badge" style="display:none">⚠ Position</div>
+    <div class="badge conf"  id="conf-badge">Conf : —</div>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
@@ -65,40 +49,181 @@
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
 
   <script>
-    // ─── Params URL ────────────────────────────────────────────────────────────
+    // ─── Config ────────────────────────────────────────────────────────────────
     const params   = new URLSearchParams(window.location.search);
     const EXERCISE = params.get('exercise') || 'push_up';
 
-    // ─── Config des exercices ──────────────────────────────────────────────────
-    // left/right  = [a, b, c] indices landmarks (b = sommet de l'angle)
-    // down / up   = seuils d'angle en degrés
-    // invert      = true si le rep se compte en montant
-    // orientation = 'horizontal' | 'vertical' | null (pas de vérif)
-    const CONFIGS = {
-      push_up:          { left:[11,13,15], right:[12,14,16], down:90,  up:160, orientation:'horizontal' },
-      squat:            { left:[23,25,27], right:[24,26,28], down:100, up:160, orientation:'vertical'   },
-      lunge:            { left:[23,25,27], right:[24,26,28], down:100, up:160, orientation:'vertical'   },
-      bicep_curl:       { left:[11,13,15], right:[12,14,16], down:30,  up:160, invert:true, orientation:'vertical' },
-      hammer_curl:      { left:[11,13,15], right:[12,14,16], down:30,  up:160, invert:true, orientation:'vertical' },
-      shoulder_press:   { left:[11,13,15], right:[12,14,16], down:90,  up:160, orientation:'vertical'   },
-      lateral_raise:    { left:[13,11,23], right:[14,12,24], down:20,  up:80,  invert:true, orientation:'vertical' },
-      tricep_dip:       { left:[11,13,15], right:[12,14,16], down:90,  up:160, orientation:'vertical'   },
-      deadlift:         { left:[11,23,25], right:[12,24,26], down:100, up:160, orientation:'vertical'   },
-      glute_bridge:     { left:[11,23,25], right:[12,24,26], down:130, up:155, orientation:'horizontal' },
-      leg_raise:        { left:[11,23,25], right:[12,24,26], down:120, up:170, invert:true, orientation:'horizontal' },
-      mountain_climber: { left:[23,25,27], right:[24,26,28], down:70,  up:150, orientation:'horizontal' },
-      high_knees:       { left:[23,25,27], right:[24,26,28], down:70,  up:150, orientation:'vertical'   },
-      calf_raise:       { left:[25,27,31], right:[26,28,32], down:160, up:175, invert:true, orientation:'vertical' },
-      jumping_jack:     { left:[11,23,25], right:[12,24,26], down:150, up:170, orientation:'vertical'   },
+    // Classes présentes dans le CSV Google ML Kit
+    const EXERCISE_CLASSES = {
+      push_up: { down: 'pushups_down', up: 'pushups_up' },
+      squat:   { down: 'squats_down',  up: 'squats_up'  },
     };
+    const cls = EXERCISE_CLASSES[EXERCISE] || EXERCISE_CLASSES['push_up'];
 
-    const cfg = CONFIGS[EXERCISE] || CONFIGS['push_up'];
+    // CSV pré-collecté par Google sur des vraies personnes
+    const CSV_URL = 'https://raw.githubusercontent.com/googlesamples/mlkit/master/android/vision-quickstart/app/src/main/assets/pose/fitness_pose_samples.csv';
 
-    // ─── État ──────────────────────────────────────────────────────────────────
-    let stage     = cfg.invert ? 'down' : 'up';
-    let repCount  = 0;
-    let isReady   = false;
+    // ─── Landmarks ─────────────────────────────────────────────────────────────
+    // 16 landmarks du corps (on ignore visage/mains)
+    // Indices MediaPipe → indices locaux 0-15 :
+    //  0:L_épaule  1:R_épaule  2:L_coude  3:R_coude  4:L_poignet  5:R_poignet
+    //  6:L_hanche  7:R_hanche  8:L_genou  9:R_genou  10:L_cheville 11:R_cheville
+    //  12:L_talon  13:R_talon  14:L_pied  15:R_pied
+    const BODY_LM = [11,12,13,14,15,16,23,24,25,26,27,28,29,30,31,32];
+
+    // Paires pour le vecteur d'embedding (même paires que Google ML Kit)
+    const PAIRS = [
+      [0,2],[1,3],   // épaule → coude
+      [2,4],[3,5],   // coude → poignet
+      [6,8],[7,9],   // hanche → genou
+      [8,10],[9,11], // genou → cheville
+      [0,4],[1,5],   // épaule → poignet (2 segments)
+      [6,10],[7,11], // hanche → cheville (2 segments)
+      [6,4],[7,5],   // hanche → poignet (4 segments)
+      [0,10],[1,11], // épaule → cheville (5 segments)
+      [2,3],[8,9],   // coude gauche ↔ droit, genou gauche ↔ droit
+      [4,5],[10,11], // poignet gauche ↔ droit, cheville gauche ↔ droit
+      [4,14],[5,15], // poignet → pied
+    ];
+
+    // ─── Pose Embedding (port du PoseEmbedding.java de Google) ─────────────────
+    function poseSize(lms) {
+      // Utilise X,Y seulement (Z moins fiable pour la taille)
+      const hcx = (lms[6].x + lms[7].x) / 2;
+      const hcy = (lms[6].y + lms[7].y) / 2;
+      const scx = (lms[0].x + lms[1].x) / 2;
+      const scy = (lms[0].y + lms[1].y) / 2;
+      let max = Math.hypot(scx - hcx, scy - hcy); // taille du torse
+      for (const lm of lms) {
+        const d = Math.hypot(lm.x - hcx, lm.y - hcy);
+        if (d > max) max = d;
+      }
+      return max;
+    }
+
+    function normalizeLandmarks(lms) {
+      // Centre sur la hanche, scale par la taille du corps
+      const cx = (lms[6].x + lms[7].x) / 2;
+      const cy = (lms[6].y + lms[7].y) / 2;
+      const cz = (lms[6].z + lms[7].z) / 2;
+      const size = poseSize(lms) || 1;
+      return lms.map(lm => ({
+        x: (lm.x - cx) / size * 100,
+        y: (lm.y - cy) / size * 100,
+        z: (lm.z - cz) / size * 100,
+      }));
+    }
+
+    function computeEmbedding(lms) {
+      const n = normalizeLandmarks(lms);
+      return PAIRS.map(([a, b]) => ({
+        x: n[b].x - n[a].x,
+        y: n[b].y - n[a].y,
+        z: n[b].z - n[a].z,
+      }));
+    }
+
+    function flipX(emb) {
+      return emb.map(v => ({ x: -v.x, y: v.y, z: v.z }));
+    }
+
+    // ─── Distances KNN ─────────────────────────────────────────────────────────
+    // Z pondéré à 0.2 car moins précis que X et Y (comme dans Google ML Kit)
+    function vecDist(a, b) {
+      return Math.sqrt(
+        (a.x - b.x) ** 2 +
+        (a.y - b.y) ** 2 +
+        (a.z - b.z) ** 2 * 0.04
+      );
+    }
+
+    function maxEmbDist(e1, e2) {
+      return Math.max(...e1.map((v, i) => vecDist(v, e2[i])));
+    }
+
+    function meanEmbDist(e1, e2) {
+      return e1.reduce((s, v, i) => s + vecDist(v, e2[i]), 0) / e1.length;
+    }
+
+    function minDist(fn, emb, sampleEmb) {
+      return Math.min(fn(emb, sampleEmb), fn(flipX(emb), sampleEmb));
+    }
+
+    // ─── Classifier KNN (2-stage, port du PoseClassifier.java) ────────────────
+    function classify(samples, emb) {
+      // Étape 1 : filtrage par distance MAX → top 30
+      const s1 = samples
+        .map(s => ({ s, d: minDist(maxEmbDist, emb, s.emb) }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 30);
+
+      // Étape 2 : filtrage par distance MOYENNE → top 10
+      const s2 = s1
+        .map(({ s }) => ({ s, d: minDist(meanEmbDist, emb, s.emb) }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 10);
+
+      // Score de confiance par classe (0-10)
+      const conf = {};
+      for (const { s } of s2) conf[s.cls] = (conf[s.cls] || 0) + 1;
+      return conf;
+    }
+
+    // ─── Chargement du CSV Google ──────────────────────────────────────────────
+    async function loadSamples() {
+      const resp = await fetch(CSV_URL);
+      const text = await resp.text();
+      const samples = [];
+      const needed = new Set([cls.down, cls.up]);
+
+      for (const line of text.split('\n')) {
+        const p = line.split(',');
+        if (p.length < 2 + 16 * 3) continue;
+        const c = p[1].trim();
+        if (!needed.has(c)) continue; // on charge seulement les classes utiles
+
+        const lms = [];
+        for (let i = 0; i < 16; i++) {
+          lms.push({
+            x: parseFloat(p[2 + i * 3]),
+            y: parseFloat(p[3 + i * 3]),
+            z: parseFloat(p[4 + i * 3]),
+          });
+        }
+        if (lms.some(l => isNaN(l.x))) continue;
+        samples.push({ cls: c, emb: computeEmbedding(lms) });
+      }
+      return samples;
+    }
+
+    // ─── Comptage de reps (port du RepetitionCounter.java) ────────────────────
+    // Hystérésis : entre à ≥6, sort à <4 → évite les faux positifs
+    const ENTER = 6, EXIT = 4;
+    let poseEntered = false;
+    let repCount = 0;
     let lastCount = -1;
+
+    function countRep(conf) {
+      const downConf = conf[cls.down] || 0;
+      const upConf   = conf[cls.up]   || 0;
+
+      document.getElementById('conf-badge').textContent =
+        '↓' + downConf + ' ↑' + upConf;
+      document.getElementById('stage-badge').textContent =
+        downConf >= upConf ? 'BAS' : 'HAUT';
+
+      if (!poseEntered && downConf >= ENTER) {
+        poseEntered = true;
+      } else if (poseEntered && downConf < EXIT) {
+        poseEntered = false;
+        repCount++;
+        document.getElementById('reps-badge').textContent = 'Reps : ' + repCount;
+        if (repCount !== lastCount) {
+          lastCount = repCount;
+          send({ type: 'counter', current_count: repCount });
+        }
+      }
+    }
 
     // ─── Communication RN ──────────────────────────────────────────────────────
     function send(data) {
@@ -106,167 +231,92 @@
       if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(msg);
       else window.parent.postMessage(data, '*');
     }
-
     function setStatus(txt) {
       document.getElementById('status-text').textContent = txt;
     }
 
-    // ─── Détection de l'orientation du corps ──────────────────────────────────
-    // Mesure la différence Y entre épaules et hanches (normalisé 0-1).
-    // Petit écart  → corps horizontal (push_up, planche…)
-    // Grand écart  → corps vertical (squat, debout…)
-    function getBodyOrientation(lm) {
-      const shoulderY = (lm[11].y + lm[12].y) / 2;
-      const hipY      = (lm[23].y + lm[24].y) / 2;
-      const diff      = hipY - shoulderY;
-
-      if (diff < 0.12) return 'horizontal'; // corps couché / planche
-      if (diff > 0.20) return 'vertical';   // corps debout
-      return 'unknown';
-    }
-
-    // Messages d'orientation selon l'exercice
-    const ORIENTATION_HINT = {
-      push_up:          'Place le téléphone sur le côté — allonge-toi en position planche',
-      glute_bridge:     'Allonge-toi sur le dos, téléphone sur le côté',
-      leg_raise:        'Allonge-toi sur le dos, téléphone sur le côté',
-      mountain_climber: 'Mets-toi en position planche, téléphone sur le côté',
-    };
-
-    // ─── Calcul d'angle ────────────────────────────────────────────────────────
-    function calcAngle(a, b, c) {
-      const r = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
-      let deg = Math.abs(r * 180 / Math.PI);
-      return deg > 180 ? 360 - deg : deg;
-    }
-
-    function getBestAngle(lm) {
-      const [la, lb, lc] = cfg.left;
-      const [ra, rb, rc] = cfg.right;
-      const lv = (lm[la].visibility + lm[lb].visibility + lm[lc].visibility) / 3;
-      const rv = (lm[ra].visibility + lm[rb].visibility + lm[rc].visibility) / 3;
-      return lv >= rv
-        ? calcAngle(lm[la], lm[lb], lm[lc])
-        : calcAngle(lm[ra], lm[rb], lm[rc]);
-    }
-
-    // ─── Machine à états ───────────────────────────────────────────────────────
-    function countRep(deg) {
-      document.getElementById('angle-badge').textContent = 'Angle : ' + deg.toFixed(0) + '°';
-
-      if (!cfg.invert) {
-        if (deg < cfg.down && stage === 'up')   stage = 'down';
-        if (deg > cfg.up   && stage === 'down') { stage = 'up';   increment(); }
-      } else {
-        if (deg > cfg.up   && stage === 'down') stage = 'up';
-        if (deg < cfg.down && stage === 'up')   { stage = 'down'; increment(); }
-      }
-
-      document.getElementById('reps-badge').textContent  = 'Reps : ' + repCount;
-      document.getElementById('stage-badge').textContent = stage.toUpperCase();
-    }
-
-    function increment() {
-      repCount++;
-      if (repCount !== lastCount) {
-        lastCount = repCount;
-        send({ type: 'counter', current_count: repCount });
-      }
-    }
-
-    // ─── Callback MediaPipe ────────────────────────────────────────────────────
+    // ─── MediaPipe callback ────────────────────────────────────────────────────
+    let poseSamples = [];
+    let isReady = false;
     const videoEl  = document.getElementById('video');
     const canvasEl = document.getElementById('canvas');
     const ctx      = canvasEl.getContext('2d');
 
     function onResults(results) {
       const W = window.innerWidth, H = window.innerHeight;
-      canvasEl.width  = W;
-      canvasEl.height = H;
+      canvasEl.width = W; canvasEl.height = H;
       ctx.clearRect(0, 0, W, H);
       ctx.drawImage(results.image, 0, 0, W, H);
 
-      if (!results.poseLandmarks) {
-        setStatus('Aucune personne détectée');
-        document.getElementById('orient-badge').style.display = 'none';
-        if (isReady) { isReady = false; send({ type: 'posture', ready: false, postureDirection: 'body' }); }
-        return;
-      }
+      if (!results.poseLandmarks || poseSamples.length === 0) return;
 
       const lm = results.poseLandmarks;
       drawConnectors(ctx, lm, POSE_CONNECTIONS, { color: '#00FF88', lineWidth: 2 });
-      drawLandmarks(ctx,  lm, { color: '#FF4444', lineWidth: 1, radius: 4 });
+      drawLandmarks(ctx, lm, { color: '#FF4444', lineWidth: 1, radius: 4 });
 
-      // Vérif : corps dans le cadre
-      const bodyVisible = [11, 12, 23, 24].every(i => lm[i]?.visibility > 0.5);
-      if (!bodyVisible) {
+      // Corps visible ?
+      const visible = [11,12,23,24].every(i => (lm[i]?.visibility || 0) > 0.5);
+      if (!visible) {
         setStatus('Recule pour être entier dans le cadre');
-        document.getElementById('orient-badge').style.display = 'none';
         if (isReady) { isReady = false; send({ type: 'posture', ready: false, postureDirection: 'body' }); }
         return;
       }
 
-      // Vérif : orientation du corps
-      if (cfg.orientation) {
-        const orientation = getBodyOrientation(lm);
-        const orientOK = orientation === cfg.orientation || orientation === 'unknown';
-
-        if (!orientOK) {
-          const hint = ORIENTATION_HINT[EXERCISE] || (
-            cfg.orientation === 'horizontal'
-              ? 'Place le téléphone sur le côté — allonge-toi'
-              : 'Mets-toi debout face à la caméra'
-          );
-          setStatus(hint);
-          document.getElementById('orient-badge').style.display = 'block';
-          // On réinitialise le stage pour éviter les comptages parasites
-          stage = cfg.invert ? 'down' : 'up';
-          if (isReady) { isReady = false; send({ type: 'posture', ready: false, postureDirection: cfg.orientation }); }
-          return;
-        }
-      }
-
-      document.getElementById('orient-badge').style.display = 'none';
       if (!isReady) { isReady = true; send({ type: 'posture', ready: true }); }
       setStatus(EXERCISE.replace(/_/g, ' ').toUpperCase());
-      countRep(getBestAngle(lm));
+
+      // Extraction des 16 landmarks du corps
+      const bodyLms = BODY_LM.map(i => ({
+        x: lm[i].x, y: lm[i].y, z: lm[i].z || 0,
+      }));
+
+      // Classification KNN + comptage
+      const emb  = computeEmbedding(bodyLms);
+      const conf = classify(poseSamples, emb);
+      countRep(conf);
     }
 
-    // ─── Init MediaPipe Pose ───────────────────────────────────────────────────
-    const pose = new Pose({
-      locateFile: f => 'https://cdn.jsdelivr.net/npm/@mediapipe/pose/' + f,
-    });
+    // ─── Init ─────────────────────────────────────────────────────────────────
+    async function init() {
+      try {
+        setStatus('Chargement des données de poses...');
+        poseSamples = await loadSamples();
+        setStatus(poseSamples.length + ' exemples chargés — démarrage caméra...');
 
-    pose.setOptions({
-      modelComplexity: 1,
-      smoothLandmarks: true,
-      enableSegmentation: false,
-      minDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5,
-    });
+        const pose = new Pose({
+          locateFile: f => 'https://cdn.jsdelivr.net/npm/@mediapipe/pose/' + f,
+        });
+        pose.setOptions({
+          modelComplexity: 1,
+          smoothLandmarks: true,
+          enableSegmentation: false,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+        pose.onResults(onResults);
 
-    pose.onResults(onResults);
-
-    // ─── Accès caméra ─────────────────────────────────────────────────────────
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false })
-      .then(stream => {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user' }, audio: false,
+        });
         videoEl.srcObject = stream;
-        videoEl.onloadedmetadata = () => {
-          videoEl.play();
-          const cam = new Camera(videoEl, {
-            onFrame: async () => { await pose.send({ image: videoEl }); },
-            width: 640,
-            height: 480,
-          });
-          cam.start();
-          send({ type: 'initialization', exercise: EXERCISE, ready: true });
-          setStatus('IA prête — ' + EXERCISE.replace(/_/g, ' '));
-        };
-      })
-      .catch(err => {
-        setStatus('Erreur caméra : ' + err.message);
+        await new Promise(r => { videoEl.onloadedmetadata = r; });
+        videoEl.play();
+
+        const cam = new Camera(videoEl, {
+          onFrame: async () => { await pose.send({ image: videoEl }); },
+          width: 640, height: 480,
+        });
+        cam.start();
+
+        send({ type: 'initialization', exercise: EXERCISE, ready: true });
+        setStatus('IA prête — ' + EXERCISE.replace(/_/g, ' '));
+      } catch (err) {
+        setStatus('Erreur : ' + err.message);
         send({ type: 'error', message: err.message });
-      });
+      }
+    }
+
+    init();
   </script>
 </body>
 </html>
