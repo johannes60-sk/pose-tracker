@@ -1,0 +1,241 @@
+/**
+ * MediaPipe Pose — HTML template
+ * Remplace PoseTracker. Détection locale des exercices via angles articulaires.
+ * Compatible avec le format de messages existant de App.js :
+ *   { type: 'counter', current_count: N }
+ *   { type: 'posture', ready: bool, postureDirection: string }
+ *   { type: 'initialization', ready: true }
+ *   { type: 'error', message: string }
+ */
+
+export const getMediaPipeHTML = (exercise = 'push_up') => `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+
+    #status {
+      position: fixed;
+      top: 20px;
+      left: 0; right: 0;
+      text-align: center;
+      z-index: 10;
+      pointer-events: none;
+    }
+    #status span {
+      background: rgba(0,0,0,0.65);
+      color: #fff;
+      font: 500 13px/1 -apple-system, sans-serif;
+      padding: 6px 18px;
+      border-radius: 99px;
+    }
+
+    #hud {
+      position: fixed;
+      bottom: 30px;
+      left: 0; right: 0;
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      z-index: 10;
+      pointer-events: none;
+    }
+    .badge {
+      background: rgba(0,0,0,0.65);
+      color: #fff;
+      font: 600 14px/1 -apple-system, sans-serif;
+      padding: 9px 18px;
+      border-radius: 99px;
+      border: 1.5px solid rgba(255,255,255,0.2);
+    }
+    .badge.reps  { border-color: #00FF88; }
+    .badge.stage { border-color: #4488FF; }
+  </style>
+</head>
+<body>
+  <video id="video" style="display:none" playsinline autoplay muted></video>
+  <canvas id="canvas"></canvas>
+
+  <div id="status"><span id="status-text">Chargement du modèle IA...</span></div>
+  <div id="hud">
+    <div class="badge reps"  id="reps-badge">Reps : 0</div>
+    <div class="badge stage" id="stage-badge">— —</div>
+    <div class="badge"       id="angle-badge">Angle : —</div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+  <script>
+    // ─── Config de l'exercice ──────────────────────────────────────────────────
+    const EXERCISE = '${exercise}';
+
+    // left/right = indices des 3 landmarks [a, b, c] (b = sommet de l'angle)
+    // down / up  = seuils d'angle (en degrés)
+    // invert     = true si le rep se compte en montant (bicep curl, etc.)
+    const CONFIGS = {
+      push_up:          { left:[11,13,15], right:[12,14,16], down:90,  up:160 },
+      squat:            { left:[23,25,27], right:[24,26,28], down:100, up:160 },
+      lunge:            { left:[23,25,27], right:[24,26,28], down:100, up:160 },
+      bicep_curl:       { left:[11,13,15], right:[12,14,16], down:30,  up:160, invert:true },
+      hammer_curl:      { left:[11,13,15], right:[12,14,16], down:30,  up:160, invert:true },
+      shoulder_press:   { left:[11,13,15], right:[12,14,16], down:90,  up:160 },
+      lateral_raise:    { left:[13,11,23], right:[14,12,24], down:20,  up:80,  invert:true },
+      tricep_dip:       { left:[11,13,15], right:[12,14,16], down:90,  up:160 },
+      deadlift:         { left:[11,23,25], right:[12,24,26], down:100, up:160 },
+      glute_bridge:     { left:[11,23,25], right:[12,24,26], down:130, up:155 },
+      leg_raise:        { left:[11,23,25], right:[12,24,26], down:120, up:170, invert:true },
+      mountain_climber: { left:[23,25,27], right:[24,26,28], down:70,  up:150 },
+      high_knees:       { left:[23,25,27], right:[24,26,28], down:70,  up:150 },
+      calf_raise:       { left:[25,27,31], right:[26,28,32], down:160, up:175, invert:true },
+      jumping_jack:     { left:[11,23,25], right:[12,24,26], down:150, up:170 },
+    };
+
+    const cfg = CONFIGS[EXERCISE] || CONFIGS['push_up'];
+
+    // ─── État ──────────────────────────────────────────────────────────────────
+    let stage     = cfg.invert ? 'down' : 'up';
+    let repCount  = 0;
+    let isReady   = false;
+    let lastCount = -1;
+
+    // ─── Communication RN ──────────────────────────────────────────────────────
+    function send(data) {
+      const msg = JSON.stringify(data);
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(msg);
+      } else {
+        window.parent.postMessage(data, '*');
+      }
+    }
+
+    // ─── Calcul d'angle (a → b → c) ───────────────────────────────────────────
+    function calcAngle(a, b, c) {
+      const r = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
+      let deg = Math.abs(r * 180 / Math.PI);
+      return deg > 180 ? 360 - deg : deg;
+    }
+
+    // Choisit le côté le plus visible
+    function getBestAngle(lm) {
+      const [la, lb, lc] = cfg.left;
+      const [ra, rb, rc] = cfg.right;
+      const lv = (lm[la].visibility + lm[lb].visibility + lm[lc].visibility) / 3;
+      const rv = (lm[ra].visibility + lm[rb].visibility + lm[rc].visibility) / 3;
+      return lv >= rv
+        ? calcAngle(lm[la], lm[lb], lm[lc])
+        : calcAngle(lm[ra], lm[rb], lm[rc]);
+    }
+
+    // ─── Machine à états pour compter les reps ─────────────────────────────────
+    function countRep(deg) {
+      document.getElementById('angle-badge').textContent = 'Angle : ' + deg.toFixed(0) + '°';
+
+      if (!cfg.invert) {
+        // Position de départ : bras/jambes tendus (angle élevé)
+        // Down → angle bas, Up → angle haut = 1 rep
+        if (deg < cfg.down && stage === 'up')   stage = 'down';
+        if (deg > cfg.up   && stage === 'down') { stage = 'up'; increment(); }
+      } else {
+        // Position de départ : angle bas
+        // Up → angle haut, Down → angle bas = 1 rep
+        if (deg > cfg.up   && stage === 'down') stage = 'up';
+        if (deg < cfg.down && stage === 'up')   { stage = 'down'; increment(); }
+      }
+
+      document.getElementById('reps-badge').textContent  = 'Reps : ' + repCount;
+      document.getElementById('stage-badge').textContent = stage.toUpperCase();
+    }
+
+    function increment() {
+      repCount++;
+      if (repCount !== lastCount) {
+        lastCount = repCount;
+        send({ type: 'counter', current_count: repCount });
+      }
+    }
+
+    // ─── Vérifie que le corps est dans le cadre ────────────────────────────────
+    function checkBodyVisible(lm) {
+      return [11, 12, 23, 24].every(i => lm[i]?.visibility > 0.5);
+    }
+
+    // ─── Callback MediaPipe ────────────────────────────────────────────────────
+    const videoEl  = document.getElementById('video');
+    const canvasEl = document.getElementById('canvas');
+    const ctx      = canvasEl.getContext('2d');
+
+    function onResults(results) {
+      const W = window.innerWidth, H = window.innerHeight;
+      canvasEl.width  = W;
+      canvasEl.height = H;
+      ctx.clearRect(0, 0, W, H);
+      ctx.drawImage(results.image, 0, 0, W, H);
+
+      if (!results.poseLandmarks) {
+        setStatus('Aucune personne détectée');
+        if (isReady) { isReady = false; send({ type: 'posture', ready: false, postureDirection: 'body' }); }
+        return;
+      }
+
+      const lm = results.poseLandmarks;
+      drawConnectors(ctx, lm, POSE_CONNECTIONS, { color: '#00FF88', lineWidth: 2 });
+      drawLandmarks(ctx,  lm, { color: '#FF4444', lineWidth: 1, radius: 4 });
+
+      if (!checkBodyVisible(lm)) {
+        setStatus('Recule pour être entier dans le cadre');
+        if (isReady) { isReady = false; send({ type: 'posture', ready: false, postureDirection: 'body' }); }
+      } else {
+        if (!isReady) { isReady = true; send({ type: 'posture', ready: true }); }
+        setStatus(EXERCISE.replace(/_/g, ' ').toUpperCase());
+        countRep(getBestAngle(lm));
+      }
+    }
+
+    function setStatus(txt) {
+      document.getElementById('status-text').textContent = txt;
+    }
+
+    // ─── Init MediaPipe Pose ───────────────────────────────────────────────────
+    const pose = new Pose({
+      locateFile: f => 'https://cdn.jsdelivr.net/npm/@mediapipe/pose/' + f,
+    });
+
+    pose.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      enableSegmentation: false,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+
+    pose.onResults(onResults);
+
+    // ─── Accès caméra ─────────────────────────────────────────────────────────
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false })
+      .then(stream => {
+        videoEl.srcObject = stream;
+        videoEl.onloadedmetadata = () => {
+          videoEl.play();
+          const cam = new Camera(videoEl, {
+            onFrame: async () => { await pose.send({ image: videoEl }); },
+            width: 640,
+            height: 480,
+          });
+          cam.start();
+          send({ type: 'initialization', exercise: EXERCISE, ready: true });
+          setStatus('IA prête — ' + EXERCISE.replace(/_/g, ' '));
+        };
+      })
+      .catch(err => {
+        setStatus('Erreur caméra : ' + err.message);
+        send({ type: 'error', message: err.message });
+      });
+  </script>
+</body>
+</html>`;

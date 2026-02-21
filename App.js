@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, Dimensions } from 'react-native';
 import WebView from 'react-native-webview';
-import { Camera, useCameraPermissions } from 'expo-camera';
+import { useCameraPermissions } from 'expo-camera';
 
-const API_KEY = "TO_DO_REPLACE";
-const POSETRACKER_API = "https://app.posetracker.com/pose_tracker/tracking";
 const { width, height } = Dimensions.get('window');
+
+const GITHUB_PAGES_URL = 'https://movelytics.github.io/PoseTracker-Example-ReactNative-Expo';
 
 export default function App() {
   const [poseTrackerInfos, setCurrentPoseTrackerInfos] = useState();
@@ -18,29 +18,7 @@ export default function App() {
     }
   }, []);
 
-  const exercise = "squat";
-  const difficulty = "easy";
-  const skeleton = true;
-
-  const posetracker_url = `${POSETRACKER_API}?token=${API_KEY}&exercise=${exercise}&difficulty=${difficulty}&width=${width}&height=${height}`;
-
-  // Bridge JavaScript BETWEEN POSETRACKER & YOUR APP
-  const jsBridge = `
-    window.addEventListener('message', function(event) {
-      window.ReactNativeWebView.postMessage(JSON.stringify(event.data));
-    });
-
-    window.webViewCallback = function(data) {
-      window.ReactNativeWebView.postMessage(JSON.stringify(data));
-    };
-
-    const originalPostMessage = window.postMessage;
-    window.postMessage = function(data) {
-      window.ReactNativeWebView.postMessage(typeof data === 'string' ? data : JSON.stringify(data));
-    };
-
-    true; // Important for a correct injection
-  `;
+  const exercise = 'push_up';
 
   const handleCounter = (count) => {
     setRepsCounter(count);
@@ -67,7 +45,6 @@ export default function App() {
       } else {
         parsedData = event.nativeEvent.data;
       }
-
       console.log('Parsed data:', parsedData);
       webViewCallback(parsedData);
     } catch (error) {
@@ -84,38 +61,29 @@ export default function App() {
         allowsInlineMediaPlayback={true}
         mediaPlaybackRequiresUserAction={false}
         style={styles.webView}
-        source={{ uri: posetracker_url }}
+        source={{ uri: `${GITHUB_PAGES_URL}?exercise=${exercise}` }}
         originWhitelist={['*']}
-        injectedJavaScript={jsBridge}
         onMessage={onMessage}
-        // Activer le debug pour voir les logs WebView
-        debuggingEnabled={true}
-        // Permettre les communications mixtes HTTP/HTTPS si nécessaire
+        // Autoriser l'accès caméra dans le WebView (Android)
+        onPermissionRequest={(request) => request.grant(request.resources)}
         mixedContentMode="compatibility"
-        // Ajouter un gestionnaire d'erreurs
         onError={(syntheticEvent) => {
-          const { nativeEvent } = syntheticEvent;
-          console.warn('WebView error:', nativeEvent);
-        }}
-        // Ajouter un gestionnaire pour les erreurs de chargement
-        onLoadingError={(syntheticEvent) => {
-          const { nativeEvent } = syntheticEvent;
-          console.warn('WebView loading error:', nativeEvent);
+          console.warn('WebView error:', syntheticEvent.nativeEvent);
         }}
       />
       <View style={styles.infoContainer}>
-        <Text>Status : {!poseTrackerInfos ? "loading AI..." : "AI Running"}</Text>
-        <Text>Info type : {!poseTrackerInfos ? "loading AI..." : poseTrackerInfos.type}</Text>
+        <Text>Status : {!poseTrackerInfos ? 'Chargement IA...' : 'IA Active'}</Text>
+        <Text>Exercice : {exercise.replace(/_/g, ' ')}</Text>
         <Text>Counter: {repsCounter}</Text>
         {poseTrackerInfos?.ready === false ? (
           <>
-            <Text>Placement ready: false</Text>
-            <Text>Placement info: Move {poseTrackerInfos?.postureDirection}</Text>
+            <Text>Position : non prêt</Text>
+            <Text>Info : {poseTrackerInfos?.postureDirection}</Text>
           </>
         ) : (
           <>
-            <Text>Placement ready: true</Text>
-            <Text>Placement info: You can start doing squats 🏋️</Text>
+            <Text>Position : prêt</Text>
+            <Text>Info : Lance ton {exercise.replace(/_/g, ' ')} !</Text>
           </>
         )}
       </View>
@@ -125,6 +93,7 @@ export default function App() {
 
 const styles = StyleSheet.create({
   container: {
+    marginTop: 50,
     flex: 1,
     flexDirection: 'column',
   },
