@@ -5,7 +5,7 @@ import { useCameraPermissions } from 'expo-camera';
 
 const { width, height } = Dimensions.get('window');
 
-const GITHUB_PAGES_URL = 'https://movelytics.github.io/PoseTracker-Example-ReactNative-Expo';
+const GITHUB_PAGES_URL = 'https://johannes60-sk.github.io/pose-tracker';
 
 export default function App() {
   const [poseTrackerInfos, setCurrentPoseTrackerInfos] = useState();
